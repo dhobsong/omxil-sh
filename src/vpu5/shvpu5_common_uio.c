@@ -33,6 +33,7 @@
 #include "shvpu5_common_log.h"
 #include "mciph.h"
 #include <sys/file.h>
+#include "shvpu5_memory_util.h"
 
 static UIOMux *uiomux = NULL;
 static const char *uio_names[] = {
@@ -44,7 +45,7 @@ static const char *uio_names[] = {
 #define VPU_UIO	(1 << 0)
 #define VPC_UIO	(1 << 1)
 
-
+static struct memory_ops *memops;
 static pthread_mutex_t uiomux_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int ref_cnt = 0;
 static unsigned long uio_reg_base = 0;
@@ -89,30 +90,6 @@ uio_interrupt_clear()
 	return 0;
 }
 
-void *
-pmem_alloc(size_t size, int align, unsigned long *paddr)
-{
-	void *vaddr;
-
-	vaddr = uiomux_malloc(uiomux, VPU_UIO, size, align);
-	if (vaddr && paddr)
-		*paddr = uiomux_virt_to_phys(uiomux, VPU_UIO, vaddr);
-
-	return vaddr;
-}
-
-void
-pmem_free(void *vaddr, size_t size)
-{
-	return uiomux_free(uiomux, VPU_UIO, vaddr, size);
-}
-
-void
-phys_pmem_free(unsigned long paddr, size_t size)
-{
-	return uiomux_free(uiomux, VPU_UIO,
-		uiomux_phys_to_virt(uiomux, VPU_UIO, paddr), size);
-}
 static void *
 uio_int_handler(void *arg)
 {
@@ -201,11 +178,13 @@ uio_init(char *name, unsigned long *paddr_reg,
 			return NULL;*/
 		uiomux = uiomux_open_named(uio_names);
 	}
+	memops = get_memory_ops();
 	ref_cnt++;
 	pthread_mutex_unlock(&uiomux_mutex);
+
 	uiomux_get_mmio(uiomux, VPU_UIO, &uio_reg_base, NULL, NULL);
-	uiomux_get_mem(uiomux, VPU_UIO, paddr_pmem,
-		       (unsigned long *)size_pmem, NULL);
+	if (memops->memory_init(paddr_pmem, size_pmem) != 0)
+		return NULL;
 
 	if (paddr_reg)
 		*paddr_reg = uio_reg_base;
@@ -225,54 +204,6 @@ uio_deinit() {
 		uiomux = NULL;
 	}
 	pthread_mutex_unlock(&uiomux_mutex);
-}
-
-int
-uio_get_virt_memory(void **address, unsigned long *size) {
-	uiomux_get_mem(uiomux, VPU_UIO, NULL,
-		       size, address);
-	return 0;
-}
-
-/**
- *
- */
-long
-vpu5_mem_read(unsigned long src_addr,
-		  unsigned long dst_addr, long count)
-{
-	void *src_vaddr;
-	logd("%s(%lx, %lx, %ld) invoked.\n", __FUNCTION__,
-	       src_addr, dst_addr, count);
-	src_vaddr = uiomux_phys_to_virt(uiomux, VPU_UIO, src_addr);
-	if ((unsigned long)src_vaddr != dst_addr)
-		memcpy((void *)dst_addr, src_vaddr, count);
-	else
-		logd("%s: copy between the same region\n",
-			__FUNCTION__);
-
-	return count;
-}
-
-/**
- *
- */
-long
-vpu5_mem_write(unsigned long src_addr,
-		   unsigned long dst_addr, long count)
-{
-	void *dst_vaddr;
-
-	logd("%s(%lx, %lx, %ld) invoked.\n", __FUNCTION__,
-	     src_addr, dst_addr, count);
-	dst_vaddr = uiomux_phys_to_virt(uiomux, VPU_UIO, dst_addr);
-	if (src_addr != (unsigned long)dst_vaddr)
-		memcpy(dst_vaddr, (void *)src_addr, count);
-	else
-		logd("%s: copy between the same region\n",
-		     __FUNCTION__);
-
-	return count;
 }
 
 /**
@@ -386,31 +317,6 @@ vpu5_set_imask(long mask_enable, long now_interrupt)
 	return;
 }
 
-unsigned long
-uio_virt_to_phys(void *context, long mode, unsigned long addr)
-{
-	unsigned long paddr;
-
-	logd("%s(%s, %lx) = ", __FUNCTION__,
-	       (mode == MCIPH_DEC) ? "MCIPH_DEC" : "MCIPH_ENC",
-	       addr);
-
-	paddr = uiomux_virt_to_phys(uiomux, VPU_UIO, (void *)addr);
-
-	logd("%lx\n", paddr);
-
-	return paddr;
-}
-
-void *
-uio_phys_to_virt(unsigned long paddr)
-{
-	void *vaddr;
-
-	vaddr = uiomux_phys_to_virt(uiomux, VPU_UIO, paddr);
-
-	return vaddr;
-}
 unsigned long uio_register_base(void) {
 	return uio_reg_base;
 }
@@ -427,3 +333,192 @@ uiomux_unlock_vpu() {
 	logd("Unlocking VPU in thread %lx\n", pthread_self());
 	uiomux_unlock(uiomux, VPU_UIO);
 }
+
+/* Memory management functions */
+void *
+pmem_alloc(size_t size, int align, unsigned long *paddr)
+{
+	return memops->pmem_alloc(size, align, paddr);
+}
+
+void
+pmem_free (void *vaddr, size_t size)
+{
+	memops->pmem_free(vaddr, size);
+}
+
+void
+phys_pmem_free (unsigned long paddr, size_t size)
+{
+	memops->phys_pmem_free(paddr, size);
+}
+
+int
+uio_get_virt_memory(void **vaddr, unsigned long *size)
+{
+	return memops->get_virt_memory(vaddr, size);
+}
+
+long
+vpu5_mem_read(unsigned long src_addr, unsigned long dst_addr, long count)
+{
+	return memops->mem_read(src_addr, dst_addr, count);
+}
+
+long
+vpu5_mem_write(unsigned long src_addr, unsigned long dst_addr, long count)
+{
+	return memops->mem_write(src_addr, dst_addr, count);
+}
+
+unsigned long
+uio_virt_to_phys(void *context, long mode, unsigned long addr)
+{
+	unsigned long paddr;
+	logd("%s(%s, %lx) = ", __FUNCTION__,
+	       (mode == MCIPH_DEC) ? "MCIPH_DEC" : "MCIPH_ENC",
+	       addr);
+
+	paddr = memops->virt_to_phys((void *)addr);
+
+	if (paddr == PHYS_UNDEF);
+		paddr = uiomux_virt_to_phys(uiomux, VPU_UIO, (void *)addr);
+
+	return paddr;
+}
+
+void *
+uio_phys_to_virt(unsigned long paddr)
+{
+	void *vaddr;
+
+	vaddr = memops->phys_to_virt(paddr);
+
+	if (vaddr == NULL)
+		vaddr = uiomux_phys_to_virt(uiomux, VPU_UIO, paddr);
+
+	return vaddr;
+}
+
+/* UIO memory management is included inline here, since it uses the
+   same UIOMux as the register definitions.  Other implementations
+   can be defined elsewhere */
+
+#if defined(VPU_UIO_MEMORY)
+
+int
+uiomem_memory_init(unsigned long *paddr_pmem, size_t *size_pmem)
+{
+	uiomux_get_mem(uiomux, VPU_UIO, paddr_pmem,
+		       (unsigned long *)size_pmem, NULL);
+	return 0;
+}
+
+void
+uiomem_memory_deinit() {
+
+}
+
+void *
+uiomem_pmem_alloc(size_t size, int align, unsigned long *paddr)
+{
+	void *vaddr;
+
+	vaddr = uiomux_malloc(uiomux, VPU_UIO, size, align);
+	if (vaddr && paddr)
+		*paddr = uiomux_virt_to_phys(uiomux, VPU_UIO, vaddr);
+
+	return vaddr;
+}
+
+void
+uiomem_pmem_free(void *vaddr, size_t size)
+{
+	return uiomux_free(uiomux, VPU_UIO, vaddr, size);
+}
+
+void
+uiomem_phys_pmem_free(unsigned long paddr, size_t size)
+{
+	return uiomux_free(uiomux, VPU_UIO,
+		uiomux_phys_to_virt(uiomux, VPU_UIO, paddr), size);
+}
+
+int
+uiomem_get_virt_memory(void **address, unsigned long *size) {
+	uiomux_get_mem(uiomux, VPU_UIO, NULL,
+		       size, address);
+	return 0;
+}
+
+/**
+ *
+ */
+long
+uiomem_mem_read(unsigned long src_addr,
+		  unsigned long dst_addr, long count)
+{
+	void *src_vaddr;
+	logd("%s(%lx, %lx, %ld) invoked.\n", __FUNCTION__,
+	       src_addr, dst_addr, count);
+	src_vaddr = uiomux_phys_to_virt(uiomux, VPU_UIO, src_addr);
+	if ((unsigned long)src_vaddr != dst_addr)
+		memcpy((void *)dst_addr, src_vaddr, count);
+	else
+		logd("%s: copy between the same region\n",
+			__FUNCTION__);
+
+	return count;
+}
+
+/**
+ *
+ */
+long
+uiomem_mem_write(unsigned long src_addr,
+		   unsigned long dst_addr, long count)
+{
+	void *dst_vaddr;
+
+	logd("%s(%lx, %lx, %ld) invoked.\n", __FUNCTION__,
+	     src_addr, dst_addr, count);
+	dst_vaddr = uiomux_phys_to_virt(uiomux, VPU_UIO, dst_addr);
+	if (src_addr != (unsigned long)dst_vaddr)
+		memcpy(dst_vaddr, (void *)src_addr, count);
+	else
+		logd("%s: copy between the same region\n",
+		     __FUNCTION__);
+
+	return count;
+}
+
+
+unsigned long
+uiomem_virt_to_phys(void *context, long mode, unsigned long addr)
+{
+	return PHYS_UNDEF;
+}
+
+void *
+uiomem_phys_to_virt(unsigned long paddr)
+{
+	return NULL;
+}
+
+struct memory_ops uiomem_ops = {
+	.pmem_alloc = uiomem_pmem_alloc,
+	.pmem_free = uiomem_pmem_free,
+	.phys_pmem_free = uiomem_phys_pmem_free,
+	.memory_init = uiomem_memory_init,
+	.memory_deinit = uiomem_memory_deinit,
+	.get_virt_memory = uiomem_get_virt_memory,
+	.mem_read = uiomem_mem_read,
+	.mem_write = uiomem_mem_write,
+	.virt_to_phys = uiomem_virt_to_phys,
+	.phys_to_virt = uiomem_phys_to_virt,
+};
+
+struct memory_ops *get_memory_ops() {
+	return &uiomem_ops;
+}
+#endif

@@ -159,7 +159,7 @@ long
 decode_init(shvpu_avcdec_PrivateType *shvpu_avcdec_Private)
 {
 	extern const MCVDEC_API_T avcdec_api_tbl;
-	shvpu_codec_t *pCodec;
+	shvpu_avcdec_codec_t *pCodec;
 	MCVDEC_CONTEXT_T *pContext;
 	unsigned long ce_firmware_addr;
 	int num_views;
@@ -168,10 +168,11 @@ decode_init(shvpu_avcdec_PrivateType *shvpu_avcdec_Private)
 	unsigned long reg_base;
 
 	/*** allocate memory ***/
-	pCodec = (shvpu_codec_t *)calloc(1, sizeof(shvpu_codec_t));
+	pCodec = (shvpu_avcdec_codec_t *)
+			calloc(1, sizeof(shvpu_avcdec_codec_t));
 	if (pCodec == NULL)
 		return -1L;
-	memset((void *)pCodec, 0, sizeof(shvpu_codec_t));
+	memset((void *)pCodec, 0, sizeof(shvpu_avcdec_codec_t));
 
 	/*** workaround clear VP5_IRQ_ENB and VPU5_IRQ_STA ***/
 	reg_base = uio_register_base();
@@ -363,10 +364,10 @@ decode_init(shvpu_avcdec_PrivateType *shvpu_avcdec_Private)
 
 void
 decode_deinit(shvpu_avcdec_PrivateType *shvpu_avcdec_Private) {
-	buffer_metainfo_t *pBMI;
+	buffer_avcdec_metainfo_t *pBMI;
 
 	if (shvpu_avcdec_Private) {
-		shvpu_codec_t *pCodec = shvpu_avcdec_Private->avCodec;
+		shvpu_avcdec_codec_t *pCodec = shvpu_avcdec_Private->avCodec;
 		decode_finalize(shvpu_avcdec_Private->avCodecContext);
 		if (shvpu_avcdec_Private->intrinsic)
 			free(shvpu_avcdec_Private->intrinsic[0]);

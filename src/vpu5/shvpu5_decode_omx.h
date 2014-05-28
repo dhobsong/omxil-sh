@@ -53,8 +53,11 @@
 #define VIDEO_DEC_BASE_NAME "OMX.re.video_decoder"
 #define VIDEO_DEC_MPEG4_NAME "OMX.re.video_decoder.mpeg4"
 #define VIDEO_DEC_H264_NAME "OMX.re.video_decoder.avc"
+#define VIDEO_DEC_H264_ONESHOT_NAME "OMX.re.video_decoder.avc.oneshot"
+#define VIDEO_DEC_VC1_NAME "OMX.re.video_decoder.vc1"
 #define VIDEO_DEC_MPEG4_ROLE "video_decoder.mpeg4"
 #define VIDEO_DEC_H264_ROLE "video_decoder.avc"
+#define VIDEO_DEC_VC1_ROLE "video_decoder.vc1"
 
 #define AVC_PROFILE_COUNT 3
 
@@ -85,7 +88,8 @@ typedef struct {
 	char 			*ce_firmware_name;
 	char 			*vlc_firmware_name;
 	struct codec_init_ops	*ops;
-	MCVDEC_API_T *		*api_tbl;
+	MCVDEC_API_T 		*api_tbl;
+	void 			*private_data;
 } shvpu_codec_params_t;
 
 typedef struct {
@@ -178,11 +182,14 @@ DERIVEDCLASS(shvpu_decode_PrivateType, omx_base_filter_PrivateType)
 	OMX_PARAM_REVPU5MAXPARAM maxVideoParameters;			\
 	/** @param enable_sync enable SYNC mode for vpu decode*/	\
 	OMX_BOOL                enable_sync;				\
+	/** @param eInputUnit field that specifies unit of each input expected */	\
+	OMX_U32 eInputUnit;						\
 	/** @param uio_start start address of the uio memory range*/	\
 	void *                  uio_start;				\
 	/** @param uio_size size of the uio memory range*/		\
 	unsigned long           uio_size;				\
 	unsigned long           uio_start_phys;				\
+	struct mem_list		*mlist_head;				\
 	shvpu_meram_t		meram_data;				\
 	shvpu_ipmmui_t		*ipmmui_data;				\
 	decode_features_t	features;				\

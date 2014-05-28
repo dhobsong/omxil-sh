@@ -32,11 +32,16 @@ static struct extension_index_entry extension_index_list [] = {
 	{OMX_IndexParamVPUMaxOutputSetting, "OMX.RE.VPU5MaxOutputSetting"},
 	{OMX_IndexParamVPUMaxInstance, "OMX.RE.VPU5MaxInstance"},
 	{OMX_IndexParamSoftwareRenderMode, "OMX.RE.SoftwareRender"},
+	{OMX_IndexParamInputUnitSetting, "OMX.RE.InputUnitSetting"},
 #ifdef ANDROID_CUSTOM
+#ifdef DECODER_COMPONENT
 	{OMX_IndexAndroidNativeEnable, "OMX.google.android.index.enableAndroidNativeBuffers"},
-	{OMX_IndexAndroidMetaDataBuffers, "OMX.google.android.index.storeMetaDataInBuffers"},
 	{OMX_IndexAndroidUseNativeBuffer, "OMX.google.android.index.useAndroidNativeBuffer"},
 	{OMX_IndexAndroidGetNativeBufferUsage, "OMX.google.android.index.getAndroidNativeBufferUsage"},
+#endif
+#ifdef ENCODER_COMPONENT
+	{OMX_IndexAndroidMetaDataBuffers, "OMX.google.android.index.storeMetaDataInBuffers"},
+#endif
 #endif
 };
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))

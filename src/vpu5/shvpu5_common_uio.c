@@ -212,8 +212,11 @@ uio_init(char *name, unsigned long *paddr_reg,
 		uiomux = uiomux_open_named(uio_names);
 		memops = get_memory_ops();
 		if (memops->memory_init(paddr_pmem, size_pmem) != 0) {
+			memops = NULL;
+			uiomux_close(uiomux);
+			uiomux = NULL;
 			pthread_mutex_unlock(&uiomux_mutex);
-			goto memops_init_fail;
+			return NULL;
 		}
 		/* clear register save on init */
 		save[0] = save[1] = save[2] = 0;
@@ -224,7 +227,8 @@ uio_init(char *name, unsigned long *paddr_reg,
 		icbcache_init();
 #endif
 	} else {
-		memops->get_phys_memory(paddr_pmem, size_pmem);
+		memops->get_phys_memory(paddr_pmem,
+			(unsigned long *)size_pmem);
 	}
 	ref_cnt++;
 
@@ -235,12 +239,6 @@ uio_init(char *name, unsigned long *paddr_reg,
 	if (paddr_reg)
 		*paddr_reg = uio_reg_base;
 	return (void *)uiomux;
-
-memops_init_fail:
-	memops = NULL;
-	uiomux_close(uiomux);
-	uiomux = NULL;
-	return NULL;
 }
 
 
@@ -473,8 +471,12 @@ uiomux_unregister_memory(void *vaddr) {
 int
 uiomem_memory_init(unsigned long *paddr_pmem, size_t *size_pmem)
 {
-	return uiomem_get_phys_memory(paddr_pmem,
+	int ret;
+	ret = uiomem_get_phys_memory(paddr_pmem,
 			(unsigned long *)size_pmem);
+	if (paddr_pmem == PHYS_INVALID)
+		return -1;
+	return ret;
 }
 
 void
@@ -563,7 +565,7 @@ uiomem_mem_write(unsigned long src_addr,
 
 
 unsigned long
-uiomem_virt_to_phys(void *context, long mode, unsigned long addr)
+uiomem_virt_to_phys(void *addr)
 {
 	return PHYS_UNDEF;
 }

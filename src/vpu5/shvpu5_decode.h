@@ -44,7 +44,18 @@ typedef struct {
 	OMX_BOOL tl_conv_mode;
 	OMX_U32  tl_conv_vbm;
 	OMX_U32  tl_conv_tbm;
+	OMX_BOOL thumbnail_mode;
 } decode_features_t;
+
+struct mem_list {
+	struct mem_list *p_next;
+	size_t size;
+	void *va;
+};
+
+void *
+pmem_alloc_reuse(struct mem_list **mlistHead, size_t size, size_t *asize,
+			int align);
 
 /* ROUND_2POW rounds up to the next muliple of y,
    which must be a power of 2 */

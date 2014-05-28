@@ -205,8 +205,8 @@ trim_trailing_zero(unsigned char *addr, size_t size)
 }
 
 static int
-copyNalData(pic_t *pPic, queue_t *pNalQueue) {
-
+copyNalData(struct mem_list **mlistHead, pic_t *pPic, queue_t *pNalQueue)
+{
 	phys_input_buf_t *pBuf;
 	nal_t **pNal, **pNalHead;
 	buffer_avcdec_metainfo_t buffer_meta;
@@ -270,7 +270,8 @@ copyNalData(pic_t *pPic, queue_t *pNalQueue) {
 	if ((pBuf->size % 2) == 0)
 		pBuf->size++;
 	pBuf->size *= 0x200;
-	pBuf->base_addr = pmem_alloc(pBuf->size, 256, NULL);
+	pBuf->base_addr = pmem_alloc_reuse(mlistHead, pBuf->size,
+					&pBuf->alloc_size, 256);
 	pNal = pNalHead;
 	pBuf->buf_offsets[0] = pBuf->base_addr + 256;
 	for (i = 0; i < pBuf->n_sbufs; i++) {
@@ -337,6 +338,7 @@ parseAVCBuffer(shvpu_decode_PrivateType *shvpu_decode_Private,
 	    OMX_BOOL 		 *pIsInBufferNeeded) {
 
 	struct avcparse_meta *avcparse = shvpu_decode_Private->avCodec->codec_priv;
+	OMX_U32 eInputUnit = shvpu_decode_Private->eInputUnit;
 	unsigned char *pHead, *pStart;
 	unsigned char *pStartSub;
 	size_t nRemainSize, nSizeSub;
@@ -344,8 +346,9 @@ parseAVCBuffer(shvpu_decode_PrivateType *shvpu_decode_Private,
 	OMX_BOOL splitBuffer;
 	OMX_BOOL lastBuffer = OMX_FALSE;
 	queue_t *NalQueue = &avcparse->NalQueue;
+	struct mem_list **mlistHead = &shvpu_decode_Private->mlist_head;
 
-	copyNalData(pActivePic, NalQueue);
+	copyNalData(mlistHead, pActivePic, NalQueue);
 
 	if (avcparse->pPrevBuffer) {
 		pStart = avcparse->pPrevBuffer->pBuffer +
@@ -368,7 +371,7 @@ parseAVCBuffer(shvpu_decode_PrivateType *shvpu_decode_Private,
 					pStartSub, nSizeSub);
 
 		if (!pHead) {
-			if (eos) {
+			if (eos || eInputUnit != OMX_InputUnitUnspecified) {
 				pHead = pStart + nRemainSize;
 				lastBuffer = OMX_TRUE;
 			} else {
@@ -405,23 +408,28 @@ parseAVCBuffer(shvpu_decode_PrivateType *shvpu_decode_Private,
 
 		if (isSubsequentPic(pNal, avcparse->prevPictureNal)) {
 			avcparse->prevPictureNal = pNal->hasPicData;
-			copyNalData(pActivePic, NalQueue);
+			copyNalData(mlistHead, pActivePic, NalQueue);
 			queue(NalQueue, pNal);
 			avcparse->pPrevBuffer = NULL;
 			return OMX_TRUE;
 		}
+
 		queue(NalQueue, pNal);
 		avcparse->prevPictureNal = pNal->hasPicData;
-		if (lastBuffer) {
-			copyNalData(pActivePic, NalQueue);
-			memset(avcparse, 0, sizeof(*avcparse));
-			return OMX_FALSE;
-		}
 	}
 
-	avcparse->pPrevBuffer = pBuffer;
-	*pIsInBufferNeeded = OMX_TRUE;
-	return OMX_FALSE;
+	if (lastBuffer) {
+		avcparse->pPrevBuffer = NULL;
+		avcparse->prevPictureNal = OMX_FALSE;
+		copyNalData(mlistHead, pActivePic, NalQueue);
+	} else {
+		avcparse->pPrevBuffer = pBuffer;
+	}
+
+	if (!eos)
+		*pIsInBufferNeeded = OMX_TRUE;
+
+	return (eInputUnit == OMX_InputUnitPicture);
 }
 
 void
@@ -448,7 +456,7 @@ deinitAvcParser(shvpu_decode_PrivateType *shvpu_decode_Private) {
 	free (avcparse);
 }
 
-static const unsigned char nal_data_eos[16] = {
+static const unsigned char nal_data_eos[] = {
 	0x00, 0x00, 0x01, 0x0B,
 };
 static struct input_parse_ops avc_parse_ops = {

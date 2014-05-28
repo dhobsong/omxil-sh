@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #define MAXBUFS 4
 
@@ -40,6 +41,7 @@
 static int bufcount;
 int ipmmui_buffer_init()
 {
+#if 0
 	static FILE *mapfile;
 	char filename[FILENAME_LEN];
 	int i;
@@ -59,12 +61,15 @@ int ipmmui_buffer_init()
 		fclose(mapfile);
 	}
 	bufcount = 0;
+#endif
 	return 0;
+
 }
 
 int ipmmui_buffer_map_vaddr(void *vaddr, unsigned int size,
 		unsigned long *paddr)
 {
+#if 0
 	static FILE *mapfile;
 	unsigned long mapaddr;
 	unsigned int mapsize;
@@ -73,7 +78,6 @@ int ipmmui_buffer_map_vaddr(void *vaddr, unsigned int size,
 
 	if (!vaddr || !paddr)
 		return -EINVAL;
-
 	if (bufcount >= MAXBUFS)
 		return -ENOMEM;
 
@@ -122,6 +126,45 @@ ipmmui_error:
 	if (mapfile)
 		fclose(mapfile);
 	return -1;
+#else
+	FILE *pagemap;
+	int pg_size = sysconf(_SC_PAGESIZE);
+	unsigned long addr = (unsigned long) vaddr;
+	uint64_t val;
+	unsigned long page_addr, page_start = 0;
+	unsigned int i;
+
+	if (!vaddr || !paddr)
+		return -EINVAL;
+
+	pagemap = fopen("/proc/self/pagemap", "r");
+
+	addr = addr / pg_size;
+	size = (size + pg_size - 1) / pg_size;
+	fseek(pagemap, addr * 8, SEEK_SET);
+	for (i = 0; i < size; i++) {
+		if (fread(&val, sizeof (uint64_t), 1, pagemap) != 1)
+			goto err;
+
+		if (!(val & (1ULL << 63)))
+			goto err;
+
+		page_addr = (val & ((1ULL << 54) - 1));
+
+		if (i == 0)
+			page_start = page_addr;
+		else if (page_addr != page_start + i)
+			goto err;
+	}
+	fclose(pagemap);
+
+	*paddr = page_start * pg_size;
+
+	return 0;
+err:
+	fclose(pagemap);
+	return -1;
+#endif
 
 }
 
@@ -133,6 +176,7 @@ int ipmmui_buffer_unmap_vaddr(void *vaddr)
 
 void ipmmui_buffer_deinit()
 {
+#if 0
 	static FILE *mapfile;
 	char filename[FILENAME_LEN];
 	int i;
@@ -150,4 +194,5 @@ void ipmmui_buffer_deinit()
 		fclose(mapfile);
 	}
 	bufcount = 0;
+#endif
 }

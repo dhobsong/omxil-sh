@@ -32,6 +32,7 @@
 #include "shvpu5_common_queue.h"
 #include "shvpu5_common_2ddmac.h"
 #include "shvpu5_common_log.h"
+#include "shvpu5_common_uio.h"
 #include "shvpu5_parse_api.h"
 #include <OMX_Video.h>
 #define _GNU_SOURCE
@@ -45,7 +46,7 @@
 
 /** Maximum Number of Video Component Instance*/
 #ifndef MAX_COMPONENT_VIDEODEC
-#define MAX_COMPONENT_VIDEODEC 4
+#define MAX_COMPONENT_VIDEODEC 2
 #endif
 /** Counter of Video Component Instance*/
 static OMX_U32 noVideoDecInstance = 0;
@@ -54,7 +55,8 @@ static pthread_mutex_t initMutex = PTHREAD_MUTEX_INITIALIZER;
 /** The output decoded color format */
 #define OUTPUT_DECODED_COLOR_FMT OMX_COLOR_FormatYUV420SemiPlanar
 #ifdef ANDROID_CUSTOM
-#define OUTPUT_ANDROID_DECODED_COLOR_FMT HAL_PIXEL_FORMAT_YV12
+// #define OUTPUT_ANDROID_DECODED_COLOR_FMT HAL_PIXEL_FORMAT_YV12
+#define OUTPUT_ANDROID_DECODED_COLOR_FMT 0x100
 #endif
 
 #define DEFAULT_WIDTH 128
@@ -107,16 +109,6 @@ shvpu_decode_Constructor(OMX_COMPONENTTYPE * pComponent,
 	unsigned long reg;
 	size_t memsz;
 
-	pthread_mutex_lock(&initMutex);
-
-	if (noVideoDecInstance >= maxVPUInstances.nInstances)   {
-		pthread_mutex_unlock(&initMutex);
-		return OMX_ErrorInsufficientResources;
-	}
-
-	noVideoDecInstance++;
-	pthread_mutex_unlock(&initMutex);
-
 	/* initialize component private data */
 	if (!pComponent->pComponentPrivate) {
 		DEBUG(DEB_LEV_FUNCTION_NAME, "In %s, allocating component\n",
@@ -124,13 +116,23 @@ shvpu_decode_Constructor(OMX_COMPONENTTYPE * pComponent,
 		pComponent->pComponentPrivate =
 			calloc(1, sizeof(shvpu_decode_PrivateType));
 		if (pComponent->pComponentPrivate == NULL) {
-			return OMX_ErrorInsufficientResources;
+			return OMX_ErrorUndefined;
 		}
 	} else {
 		DEBUG(DEB_LEV_FUNCTION_NAME,
 		      "In %s, Error Component %x Already Allocated\n",
 		      __func__, (int)pComponent->pComponentPrivate);
 	}
+
+	pthread_mutex_lock(&initMutex);
+
+	if (noVideoDecInstance >= maxVPUInstances.nInstances)   {
+		pthread_mutex_unlock(&initMutex);
+		loge("Too many instances\n");
+		return OMX_ErrorInsufficientResources;
+	}
+
+	pthread_mutex_unlock(&initMutex);
 
 	shvpu_decode_Private = pComponent->pComponentPrivate;
 	shvpu_decode_Private->ports = NULL;
@@ -189,7 +191,6 @@ shvpu_decode_Constructor(OMX_COMPONENTTYPE * pComponent,
 	inPort->sPortParam.format.video.xFramerate = 0;
 	inPort->sPortParam.format.video.eCompressionFormat =
 		OMX_VIDEO_CodingAVC;
-	inPort->Port_FreeBuffer = shvpu_decode_port_FreeBuffer;
 
 	//common parameters related to output port
 	outPort =
@@ -204,17 +205,27 @@ shvpu_decode_Constructor(OMX_COMPONENTTYPE * pComponent,
 	outPort->sVideoParam.eColorFormat = OUTPUT_DECODED_COLOR_FMT;
 	outPort->sVideoParam.xFramerate = 0;
 
+	/* OMX_PARAM_REVPU5INPUTUNIT */
+	shvpu_decode_Private->eInputUnit = OMX_InputUnitUnspecified;
+
 	/** now it's time to know the video coding type of the component */
 	if (!strcmp(cComponentName, VIDEO_DEC_MPEG4_NAME)) {
 		shvpu_decode_Private->video_coding_type =
 			OMX_VIDEO_CodingMPEG4;
+	} else if (!strcmp(cComponentName, VIDEO_DEC_H264_ONESHOT_NAME)) {
+		shvpu_decode_Private->video_coding_type = OMX_VIDEO_CodingAVC;
+		shvpu_decode_Private->enable_sync = OMX_TRUE;
+		shvpu_decode_Private->eInputUnit = OMX_InputUnitPicture;
 	} else if (!strcmp(cComponentName, VIDEO_DEC_H264_NAME)) {
 		shvpu_decode_Private->video_coding_type = OMX_VIDEO_CodingAVC;
+	} else if (!strcmp(cComponentName, VIDEO_DEC_VC1_NAME)) {
+		shvpu_decode_Private->video_coding_type = OMX_VIDEO_CodingWMV;
 	} else if (!strcmp(cComponentName, VIDEO_DEC_BASE_NAME)) {
 		shvpu_decode_Private->video_coding_type =
 			OMX_VIDEO_CodingUnused;
 	} else {
 		// IL client specified an invalid component name
+		free(pComponent->pComponentPrivate);
 		return OMX_ErrorInvalidComponentName;
 	}
 
@@ -224,16 +235,14 @@ shvpu_decode_Constructor(OMX_COMPONENTTYPE * pComponent,
 	outPort->Port_FreeBuffer = shvpu_decode_port_FreeBuffer;
 	SetInternalVideoParameters(pComponent);
 
-	if (shvpu_decode_Private->video_coding_type ==
-	    OMX_VIDEO_CodingMPEG4) {
-		shvpu_decode_Private->
-			ports[OMX_BASE_FILTER_INPUTPORT_INDEX]->sPortParam.format.
-			video.eCompressionFormat = OMX_VIDEO_CodingMPEG4;
-	} else {
-		shvpu_decode_Private->
-			ports[OMX_BASE_FILTER_INPUTPORT_INDEX]->sPortParam.format.
-			video.eCompressionFormat = OMX_VIDEO_CodingAVC;
-	}
+	shvpu_decode_Private->ports[OMX_BASE_FILTER_INPUTPORT_INDEX]->
+		sPortParam.format.video.eCompressionFormat =
+			shvpu_decode_Private->video_coding_type;
+
+	((omx_base_video_PortType *)(shvpu_decode_Private->
+			ports[OMX_BASE_FILTER_INPUTPORT_INDEX]))->
+			sVideoParam.eCompressionFormat =
+		shvpu_decode_Private->video_coding_type;
 
 	/** general configuration irrespective of any video formats
 	 * setting other parameters of shvpu_decode_private
@@ -265,12 +274,24 @@ shvpu_decode_Constructor(OMX_COMPONENTTYPE * pComponent,
 
 
 	/* initialize a vpu uio */
-	uio_init("VPU", &reg, &shvpu_decode_Private->uio_start_phys, &memsz);
+	if (!uio_init("VPU", &reg, &shvpu_decode_Private->uio_start_phys,
+			&memsz)) {
+		loge("UIO Initialization failed!\n");
+		return OMX_ErrorInsufficientResources;
+	}
+
 	uio_get_virt_memory(&shvpu_decode_Private->uio_start,
 			&shvpu_decode_Private->uio_size);
 
-	loge("reg = %x, mem = %x, memsz = %d\n",
-	     reg, shvpu_decode_Private->uio_start_phys, memsz);
+
+	if (!memsz || reg == PHYS_INVALID ||
+			shvpu_decode_Private->uio_start_phys == PHYS_INVALID) {
+		loge("VPU Insufficient memory resources\n");
+		loge("reg = %x, mem = %x, memsz = %d\n",
+		     reg, shvpu_decode_Private->uio_start_phys, memsz);
+		uio_deinit();
+		return OMX_ErrorInsufficientResources;
+	}
 
 	/*OMX_PARAM_REVPU5MAXPARAM*/
 	setHeader(&shvpu_decode_Private->maxVideoParameters,
@@ -286,6 +307,8 @@ shvpu_decode_Constructor(OMX_COMPONENTTYPE * pComponent,
 	}
 	shvpu_decode_Private->maxVideoParameters.eVPU5MpegLevel =
 		OMX_VPU5MpegLevel6;
+	shvpu_decode_Private->maxVideoParameters.eVPU5VC1Level =
+		OMX_VPU5VC1Level3;
 
 	/*OMX_PARAM_REVPU5MAXINSTANCE*/
 	setHeader(&maxVPUInstances,
@@ -296,16 +319,18 @@ shvpu_decode_Constructor(OMX_COMPONENTTYPE * pComponent,
 
 #ifdef USE_BUFFER_MODE
 	shvpu_decode_Private->features.use_buffer_mode = OMX_TRUE;
-#ifdef DMAC_MODE
-	shvpu_decode_Private->features.dmac_mode = OMX_TRUE;
-#endif
 #endif
 
 #ifdef TL_CONV_ENABLE
 	shvpu_decode_Private->features.tl_conv_mode = OMX_TRUE;
 	shvpu_decode_Private->features.tl_conv_tbm = LOG2_TB;
 	shvpu_decode_Private->features.tl_conv_vbm = LOG2_VB;
+	shvpu_decode_Private->features.thumbnail_mode = OMX_FALSE;
 #endif
+
+	pthread_mutex_lock(&initMutex);
+	noVideoDecInstance++;
+	pthread_mutex_unlock(&initMutex);
 
 	/* initialize ippmui for buffers */
 	if (!shvpu_decode_Private->features.use_buffer_mode)
@@ -314,14 +339,15 @@ shvpu_decode_Constructor(OMX_COMPONENTTYPE * pComponent,
 	if (!shvpu_decode_Private->features.dmac_mode)
 		return eError;
 
-	if (ipmmui_buffer_init() < 0)
-		return OMX_ErrorHardware;
-
-	/* initialize 2D-DMAC for buffers */
-	if (DMAC_init() < 0)
-		return OMX_ErrorHardware;
-
 	return eError;
+
+hardware_error:
+	uio_deinit();
+	free(pComponent->pComponentPrivate);
+	pthread_mutex_lock(&initMutex);
+	noVideoDecInstance--;
+	pthread_mutex_unlock(&initMutex);
+	return OMX_ErrorHardware;
 }
 
 /** The destructor of the video decoder component
@@ -331,6 +357,9 @@ OMX_ERRORTYPE shvpu_decode_Destructor(OMX_COMPONENTTYPE * pComponent)
 	shvpu_decode_PrivateType *shvpu_decode_Private =
 		pComponent->pComponentPrivate;
 	OMX_U32 i;
+
+	if (!shvpu_decode_Private)
+		return OMX_ErrorNone;
 
 	shvpu_decode_Deinit(pComponent);
 
@@ -356,22 +385,23 @@ OMX_ERRORTYPE shvpu_decode_Destructor(OMX_COMPONENTTYPE * pComponent)
 	DEBUG(DEB_LEV_FUNCTION_NAME,
 	      "Destructor of video decoder component is called\n");
 
-	/*remove any remaining picutre elements if they haven't
-          already been remover (i.e. premature decode cancel)*/
-
 	free(shvpu_decode_Private->pPicSem);
 	queue_deinit(shvpu_decode_Private->pPicQueue);
 	free(shvpu_decode_Private->pPicQueue);
 
 	omx_base_filter_Destructor(pComponent);
-	noVideoDecInstance--;
 
-	uio_deinit();
+	if (shvpu_decode_Private->uio_start_phys)
+		uio_deinit();
 
 	if(shvpu_decode_Private->features.dmac_mode) {
 		DMAC_deinit();
 		ipmmui_buffer_deinit();
 	}
+
+	pthread_mutex_lock(&initMutex);
+	noVideoDecInstance--;
+	pthread_mutex_unlock(&initMutex);
 
 	return OMX_ErrorNone;
 }
@@ -400,6 +430,9 @@ shvpu_decode_vpuLibInit(shvpu_decode_PrivateType * shvpu_decode_Private)
 		break;
 	case OMX_VIDEO_CodingAVC:
 		initAvcParser(shvpu_decode_Private);
+		break;
+	case OMX_VIDEO_CodingWMV:
+		initVc1Parser(shvpu_decode_Private);
 		break;
 	}
 	return OMX_ErrorNone;
@@ -619,7 +652,7 @@ UpdateFrameSize(OMX_COMPONENTTYPE * pComponent)
 			ROUND_2POW(outPort->sPortParam.format.video.nFrameWidth,32);
 	}
 	outPort->sPortParam.format.video.nFrameWidth =
-		ALIGN_STRIDE(inPort->sPortParam.format.video.nFrameWidth);
+		inPort->sPortParam.format.video.nFrameWidth;
 	outPort->sPortParam.format.video.nFrameHeight =
 		inPort->sPortParam.format.video.nFrameHeight;
 	outPort->sPortParam.format.video.nSliceHeight =
@@ -1115,12 +1148,16 @@ shvpu_decode_BufferMgmtFunction(void *param)
 				pPic = calloc(1, sizeof (pic_t));
 			pic_done = pCodec->pops->parseBuffer(shvpu_decode_Private,
 				   pInBuffer[0],
-				   (pInBuffer[0]->nFlags & OMX_BUFFERFLAG_EOS),
+			           (pInBuffer[0]->nFlags & OMX_BUFFERFLAG_EOS),
 				   pPic,
 				   &isInBufferNeeded);
 			if (pic_done || pInBuffer[0]->nFlags & OMX_BUFFERFLAG_EOS) {
-				queue(shvpu_decode_Private->pPicQueue, pPic);
-				tsem_up(pPicSem);
+				if (pPic->size) {
+					queue(shvpu_decode_Private->pPicQueue, pPic);
+					tsem_up(pPicSem);
+				} else {
+					free(pPic);
+				}
 				pPic = NULL;
 				if (pInBuffer[0]->nFlags & OMX_BUFFERFLAG_EOS)
 					shvpu_decode_Private->bIsEOSReached = OMX_TRUE;
@@ -1231,6 +1268,41 @@ wait_vlc_buffering(shvpu_decode_codec_t *pCodec)
 	return;
 }
 
+static void
+memcpy_output_buffer(shvpu_decode_PrivateType *shvpu_decode_Private,
+		MCVDEC_CMN_PICINFO_T *pic_info,
+		OMX_U8 *vid_data,
+		OMX_U8 *buffer)
+{
+	size_t copy_size;
+	size_t pitch;
+	size_t xsize = pic_info->xpic_size;
+	size_t ysize = pic_info->ypic_size -
+			pic_info->frame_crop[MCVDEC_CROP_BOTTOM];
+	pitch = ROUND_2POW(xsize, 32);
+	copy_size = pitch * ysize;
+
+	if (shvpu_decode_Private->features.thumbnail_mode && xsize != pitch) {
+		unsigned int i;
+		for (i = 0; i < ysize; i++) {
+			memcpy(buffer, vid_data, xsize);
+			buffer += xsize;
+			vid_data += pitch;
+		}
+		vid_data += pic_info->frame_crop[MCVDEC_CROP_BOTTOM] * pitch;
+		for (i = 0; i < ysize / 2; i++) {
+			memcpy(buffer, vid_data, xsize);
+			buffer += xsize;
+			vid_data += pitch;
+		}
+	} else {
+		memcpy(buffer, vid_data, copy_size);
+		memcpy(buffer + copy_size,
+			vid_data + pitch * pic_info->ypic_size,
+			copy_size / 2);
+	}
+}
+
 /** This function is used to process the input buffer and
     provide one output buffer
 */
@@ -1298,7 +1370,9 @@ shvpu_decode_DecodePicture(OMX_COMPONENTTYPE * pComponent,
 		loge("terminating because of an error(%d)\n", ret);
 		return;
 	case MCVDEC_NO_STRM:
-		loge("Error NO_STRM reported. Trying a reset\n", ret);
+		if (shvpu_decode_Private->bIsEOSReached)
+			break;
+		loge("Error NO_STRM reported. Trying a reset %d\n", ret);
 		mcvdec_set_play_mode(
 			shvpu_decode_Private->avCodecContext,
 			MCVDEC_PLAY_FORWARD, 0, 0);
@@ -1422,8 +1496,8 @@ shvpu_decode_DecodePicture(OMX_COMPONENTTYPE * pComponent,
 				(pComponent,
 				 shvpu_decode_Private->callbackData,
 				 OMX_EventPortSettingsChanged, // The command was completed
-				 0,  //to adjust the file pointer to resume the correct decode process
-				 0, // This is the input port index
+				 OMX_BASE_FILTER_OUTPUTPORT_INDEX,
+				 0,
 				 NULL);
 		}
 	}
@@ -1509,20 +1583,14 @@ shvpu_decode_DecodePicture(OMX_COMPONENTTYPE * pComponent,
 				pOutBuffer->nOffset = 0;
 				DMAC_copy_buffer((unsigned long)
 						pOutBuffer->pPlatformPrivate,
-					frame->Ypic_addr);
+						phys_to_ipmmui(shvpu_decode_Private->
+							ipmmui_data,
+							frame->Ypic_addr));
 			} else {
-				size_t copy_size;
-				size_t pitch;
-				OMX_U8 *out_buffer;
-				pitch = ROUND_2POW(pic_infos[0]->xpic_size, 32);
-				copy_size = pitch * (pic_infos[0]->ypic_size -
-					pic_infos[0]->frame_crop
-						[MCVDEC_CROP_BOTTOM]);
 				pOutBuffer->nOffset = 0;
-				memcpy(pOutBuffer->pBuffer, vaddr, copy_size);
-				memcpy(pOutBuffer->pBuffer + copy_size,
-					vaddr + pitch * pic_infos[0]->ypic_size,
-					copy_size / 2);
+				memcpy_output_buffer(shvpu_decode_Private,
+					pic_infos[0], vaddr,
+					pOutBuffer->pBuffer);
 			}
 			pthread_mutex_unlock(&shvpu_decode_Private->
 					     avCodec->fmem[pic_infos[0]->
@@ -1566,6 +1634,27 @@ shvpu_decode_DecodePicture(OMX_COMPONENTTYPE * pComponent,
 		     "pic_infos[0] = %p, frame = %p", ret,
 		     pic_infos[0],frame);
 	}
+}
+
+static OMX_BOOL
+set_dmac_mode(shvpu_decode_PrivateType *shvpu_decode_Private,
+		OMX_BOOL enable) {
+	if (enable) {
+		if (!shvpu_decode_Private->features.dmac_mode) {
+			if (ipmmui_buffer_init() < 0)
+				return OMX_FALSE;
+
+			if (DMAC_init() < 0)
+				return OMX_FALSE;
+		}
+	} else {
+		if (shvpu_decode_Private->features.dmac_mode) {
+			DMAC_deinit();
+			ipmmui_buffer_deinit();
+		}
+	}
+	shvpu_decode_Private->features.dmac_mode = enable;
+	return OMX_TRUE;
 }
 
 static OMX_BOOL
@@ -1816,7 +1905,11 @@ shvpu_decode_SetParameter(OMX_HANDLETYPE hComponent,
 			shvpu_decode_Private->features.dmac_mode =
 				!(*(OMX_BOOL *)ComponentParameterStructure);
 #endif
-			shvpu_decode_Private->enable_sync = OMX_TRUE;
+			shvpu_decode_Private->features.thumbnail_mode =
+				(*(OMX_BOOL *)ComponentParameterStructure);
+
+			shvpu_decode_Private->enable_sync =
+				(*(OMX_BOOL *)ComponentParameterStructure);
 
 			logd("Switching software readable output mode %s\n",
 			     (*(OMX_BOOL *)ComponentParameterStructure ==
@@ -1828,6 +1921,28 @@ shvpu_decode_SetParameter(OMX_HANDLETYPE hComponent,
 					maxVideoParameters.eVPU5AVCLevel;
 				*AvcLevel = *AvcLevel > OMX_VPU5AVCLevel4 ?
 					OMX_VPU5AVCLevel4 : *AvcLevel;
+			}
+			break;
+		}
+		case OMX_IndexParamInputUnitSetting:
+		{
+			OMX_PARAM_REVPU5INPUTUNIT *pInputUnit;
+			pInputUnit = ComponentParameterStructure;
+			eError = checkHeader(pInputUnit,
+					     sizeof
+					     (OMX_PARAM_REVPU5INPUTUNIT));
+			if (eError != OMX_ErrorNone)
+				break;
+
+			switch (pInputUnit->eInputUnit) {
+			case OMX_InputUnitUnspecified:
+			case OMX_InputUnitPicture:
+				shvpu_decode_Private->eInputUnit =
+					pInputUnit->eInputUnit;
+				break;
+			default:
+				eError = OMX_ErrorBadParameter;
+				break;
 			}
 			break;
 		}
@@ -1858,6 +1973,12 @@ shvpu_decode_SetParameter(OMX_HANDLETYPE hComponent,
 			else
 				outPort->sPortParam.format.video.eColorFormat =
 					OUTPUT_DECODED_COLOR_FMT;
+
+#ifdef DMAC_MODE
+			if (set_dmac_mode(shvpu_decode_Private, enable) ==
+					OMX_FALSE)
+				eError = OMX_ErrorUndefined;
+#endif
 			break;
 		}
 		case OMX_IndexAndroidUseNativeBuffer:
@@ -2076,6 +2197,19 @@ shvpu_decode_GetParameter(OMX_HANDLETYPE hComponent,
 				!shvpu_decode_Private->features.tl_conv_mode;
 			break;
 		}
+		case OMX_IndexParamInputUnitSetting:
+		{
+			OMX_PARAM_REVPU5INPUTUNIT *pInputUnit;
+			pInputUnit = ComponentParameterStructure;
+			eError = checkHeader(pInputUnit,
+					     sizeof
+					     (OMX_PARAM_REVPU5INPUTUNIT));
+
+			if (eError == OMX_ErrorNone)
+				pInputUnit->eInputUnit =
+					shvpu_decode_Private->eInputUnit;
+			break;
+		}
 #ifdef ANDROID_CUSTOM
 		case OMX_IndexAndroidGetNativeBufferUsage:
 		{
@@ -2095,15 +2229,38 @@ shvpu_decode_GetParameter(OMX_HANDLETYPE hComponent,
 	return eError;
 }
 
-/** GetConfig
-  * Right now we don't support any configuration, so return
-  * OMX_ErrBadParameter for any request that we get
-  */
 OMX_ERRORTYPE
 shvpu_decode_GetConfig(OMX_HANDLETYPE hComponent,
 		       OMX_INDEXTYPE nIndex,
 		       OMX_PTR pComponentConfigStructure)  {
-	return OMX_ErrorBadParameter;
+
+	OMX_COMPONENTTYPE *pComponent = hComponent;
+	shvpu_decode_PrivateType *shvpu_decode_Private =
+		pComponent->pComponentPrivate;
+	OMX_ERRORTYPE eError =  OMX_ErrorBadParameter;
+	if (pComponentConfigStructure == NULL)
+		return eError;
+
+	switch (nIndex) {
+	case OMX_IndexConfigCommonOutputCrop:
+	{
+		OMX_CONFIG_RECTTYPE *rec = pComponentConfigStructure;
+		omx_base_video_PortType *inPort = (omx_base_video_PortType *)
+			shvpu_decode_Private->
+					ports[OMX_BASE_FILTER_INPUTPORT_INDEX];
+		eError = checkHeader(rec, sizeof(OMX_CONFIG_RECTTYPE));
+		if (eError != OMX_ErrorNone)
+			break;
+		rec->nLeft = 0;
+		rec->nTop = 0;
+		rec->nWidth = inPort->sPortParam.format.video.nFrameWidth;
+		rec->nHeight = inPort->sPortParam.format.video.nFrameHeight;
+		break;
+	}
+	default:
+		break;
+	}
+	return eError;
 }
 
 OMX_ERRORTYPE
@@ -2368,9 +2525,12 @@ OMX_ERRORTYPE shvpu_decode_port_UseBuffer(
       outPort->pInternalBufferStorage[i]->pBuffer = pBuffer;
       outPort->pInternalBufferStorage[i]->nAllocLen = nSizeBytes;
       if (shvpu_decode_Private->features.dmac_mode) {
-          ipmmui_buffer_map_vaddr(pBuffer, nSizeBytes,
+	  int res;
+          res =  ipmmui_buffer_map_vaddr(pBuffer, nSizeBytes,
 		(unsigned long *)&outPort->pInternalBufferStorage[i]->
 		pPlatformPrivate);
+	  if (res)
+		set_dmac_mode(shvpu_decode_Private, OMX_FALSE);
       }
 
       outPort->pInternalBufferStorage[i]->pAppPrivate = pAppPrivate;
@@ -2433,9 +2593,11 @@ shvpu_decode_port_FreeBuffer(
   for(i=0; i < pPort->sPortParam.nBufferCountActual; i++){
     if(pPort->pInternalBufferStorage[i] == pBuffer) {
       pPort->bIsFullOfBuffers = OMX_FALSE;
-      if(pPort->bBufferStateAllocated[i] & BUFFER_ALLOCATED)
-        pBuffer->pBuffer = NULL; /* we don't actually allocate anything */
-      else if (pPort->bBufferStateAllocated[i] & BUFFER_ASSIGNED)
+      if(pPort->bBufferStateAllocated[i] & BUFFER_ALLOCATED) {
+        if(nPortIndex == OMX_BASE_FILTER_INPUTPORT_INDEX)
+          free(pBuffer->pBuffer); /* output ports don't allocate memory */
+        pBuffer->pBuffer = NULL;
+      } else if (pPort->bBufferStateAllocated[i] & BUFFER_ASSIGNED)
 	if (shvpu_decode_Private->features.dmac_mode)
 	    ipmmui_buffer_unmap_vaddr(pBuffer->pBuffer);
       if(pPort->bBufferStateAllocated[i] & HEADER_ALLOCATED) {

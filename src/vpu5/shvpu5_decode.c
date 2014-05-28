@@ -61,6 +61,9 @@ decode_init(shvpu_decode_PrivateType *shvpu_decode_Private)
 	unsigned long ce_firmware_addr;
 	struct codec_init_ops *cops;
 	int num_views;
+	int buf_total;
+	void *vaddr;
+	unsigned long paddr;
 
 	/*** allocate memory ***/
 	pCodec = (shvpu_decode_codec_t *)
@@ -108,6 +111,11 @@ decode_init(shvpu_decode_PrivateType *shvpu_decode_Private)
 		pCodec->cprop.max_slice_cnt		= 1,
 		mpegCodec_init(&pCodec->vpu_codec_params, shvpu_decode_Private);
 		break;
+	case OMX_VIDEO_CodingWMV:
+		pCodec->cprop.stream_type		= MCVDEC_VC1,
+		pCodec->cprop.max_slice_cnt		= 2,
+		vc1Codec_init(&pCodec->vpu_codec_params, shvpu_decode_Private);
+		break;
 	default:
 		goto free_pcodec;
 		
@@ -154,8 +162,6 @@ decode_init(shvpu_decode_PrivateType *shvpu_decode_Private)
 		return ret;
 
 	/*** initialize work area ***/
-	void *vaddr;
-	unsigned long paddr;
 
 	cops->calc_buf_sizes(num_views,
 		shvpu_decode_Private,
@@ -163,7 +169,17 @@ decode_init(shvpu_decode_PrivateType *shvpu_decode_Private)
 		&pCodec->imd_info.imd_buff_size,
         	&pCodec->ir_info.ir_info_size,
         	&pCodec->mv_info.mv_info_size);
-		
+
+	buf_total = pCodec->imd_info.imd_buff_size +
+			pCodec->ir_info.ir_info_size +
+			pCodec->mv_info.mv_info_size;
+
+	logd("Middleware buffer sizes:\n");
+	logd("Intermed. decode buffer: %d\n", pCodec->imd_info.imd_buff_size);
+	logd("Init buffer: %d\n", pCodec->ir_info.ir_info_size);
+	logd("Motion vectors: %d\n", pCodec->mv_info.mv_info_size);
+	logd("----------------------------\n");
+	logd("Total = %d (%dMB)\n", buf_total, buf_total >> 20);
 
 	pCodec->imd_info.imd_buff_mode = MCVDEC_MODE_NOMAL;
 
@@ -202,9 +218,11 @@ decode_init(shvpu_decode_PrivateType *shvpu_decode_Private)
 	pCodec->frameCount = pCodec->bufferingCount = 0;
 
 	if (shvpu_decode_Private->enable_sync) {
+		logi("Use the SYNC mode for low latency.\n");
 		pCodec->codecMode = MCVDEC_MODE_SYNC;
 		pCodec->outMode = MCVDEC_OUTMODE_PULL;
 	} else {
+		logi("Use the BUFFERING/MAIN mode for high throughput.\n");
 		pCodec->codecMode = MCVDEC_MODE_BUFFERING;
 		pCodec->outMode = MCVDEC_OUTMODE_PUSH;
 	}
@@ -223,6 +241,20 @@ decode_init(shvpu_decode_PrivateType *shvpu_decode_Private)
 free_pcodec:
 	free(pCodec);
 	return -1;
+}
+
+static void
+free_memory_list(struct mem_list **mlist_head)
+{
+	struct mem_list *pm, *n_pm;
+
+	for (pm = *mlist_head; pm; pm = n_pm) {
+		n_pm = pm->p_next;
+		logd("  free (%p:%u) [%p]", pm->va, pm->size, pm);
+		pmem_free(pm->va, pm->size);
+		free(pm);
+	}
+	*mlist_head = NULL;
 }
 
 void
@@ -279,8 +311,9 @@ decode_deinit(shvpu_decode_PrivateType *shvpu_decode_Private) {
 
 		free(pCodec);
 
-		shvpu_decode_Private->avCodec = NULL;
+		free_memory_list(&shvpu_decode_Private->mlist_head);
 
+		shvpu_decode_Private->avCodec = NULL;
 
 	}
 }

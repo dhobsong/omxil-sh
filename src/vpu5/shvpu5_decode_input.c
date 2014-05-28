@@ -44,6 +44,22 @@ typedef struct {
 	int	n_bufs;
 } si_element_t;
 
+static struct mem_list *
+add_free_mem_to_list(struct mem_list **mlist_head, void *vaddr, size_t size)
+{
+	struct mem_list *pm;
+
+	pm = malloc(sizeof(struct mem_list));
+	if (pm) {
+		pm->va = vaddr;
+		pm->size = size;
+		logd("%s (%p:%u)", __func__, pm->va, pm->size);
+		pm->p_next = *mlist_head;
+		*mlist_head = pm;
+	}
+	return pm;
+}
+
 long
 mcvdec_uf_release_stream(MCVDEC_CONTEXT_T *context,
 			 long strm_id,
@@ -72,7 +88,9 @@ mcvdec_uf_release_stream(MCVDEC_CONTEXT_T *context,
 
 	if (si) {
 		for (i=0; i < si->n_bufs; i++) {
-			pmem_free(si->pBufs[i]->base_addr, si->pBufs[i]->size);
+			add_free_mem_to_list(&shvpu_decode_Private->mlist_head,
+					si->pBufs[i]->base_addr,
+					si->pBufs[i]->alloc_size);
 			free(si->pBufs[i]);
 		}
 
@@ -101,6 +119,7 @@ setup_eos(MCVDEC_INPUT_STRM_T *input_strm, int frame, queue_t *pSIQueue,
 		uioBufSize++;
 	uioBufSize *= 256;
 	uioBuf = pBuf = pmem_alloc(uioBufSize, 32, NULL);
+	memset(pBuf, 0, uioBufSize);
 	if (uioBuf == NULL) {
 		loge("%s: No memory for uio buffer\n",
 		     __FUNCTION__);
@@ -111,7 +130,7 @@ setup_eos(MCVDEC_INPUT_STRM_T *input_strm, int frame, queue_t *pSIQueue,
 	memcpy(pBuf, eos_code, eos_code_len);
 	si_eos = calloc (1, sizeof(MCVDEC_STRM_INFO_T));
 	si_eos->strm_buff_addr = pBuf;
-	si_eos->strm_buff_size = 4;
+	si_eos->strm_buff_size = eos_code_len;
 	input_strm->second_id = 0;
 	input_strm->strm_info = si_eos;
         input_strm->strm_cnt = 1;
@@ -256,4 +275,43 @@ free_remaining_streams(queue_t *pSIQueue)
 		free(si->pStrmInfo);
 		free(si);
 	}
+}
+
+void *
+pmem_alloc_reuse(struct mem_list **mlistHead, size_t size, size_t *asize,
+			int align)
+{
+	void *vaddr;
+	struct mem_list *pm = *mlistHead;
+	*asize = size;
+
+	/*
+	 * Maintain a list (stack) of the freed memory regions with the
+	 * Last Recently Used region at the head of the list.
+	 * If the requested memory size is less than the size of the head
+	 * entry, free the original region and allocate a new one.
+	 * This region will be added to the cache memory list when it is freed.
+	 * Therefore, the size of the cache memory entries will gradually
+	 * increase as the video plays. (Up to the maximum parse unit
+	 * (eg. NAL Unit) size).
+	 * Updating the head of the list to fit the required allocation is
+	 * more efficient than trying to find a suitable sized entry
+	 * by searching through the entire list every time.
+	 */
+	if (pm) {
+		*mlistHead = pm->p_next;
+		if (size > pm->size) {
+			logd("%s extend (%p:%u) > %u [%p]", __func__, pm->va,
+					pm->size, size, pm);
+			pmem_free(pm->va, pm->size);
+			vaddr = pmem_alloc(size, align, NULL);
+		} else {
+			logd("reuse  >(%p:%u)", pm->va, pm->size);
+			vaddr = pm->va;
+			*asize = pm->size;
+		}
+		free(pm);
+		return vaddr;
+	} else
+		return pmem_alloc(size, align, NULL);
 }

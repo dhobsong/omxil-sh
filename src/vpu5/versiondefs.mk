@@ -13,6 +13,9 @@ endif
 ifeq ($(PRODUCT_VPU_VERSION), VPU_VERSION_5HD)
 	VPU_SERIES := VPU5HA_SERIES
 endif
+ifeq ($(PRODUCT_VPU_VERSION), VPU_VERSION_VCP1)
+	VPU_SERIES := VPU5HA_SERIES
+endif
 
 ifeq ($(VPU_SERIES),)
 $(error Unknown VPU setting: $(PRODUCT_VPU_VERSION))
@@ -29,9 +32,4 @@ ifeq ($(VPU_MEMORY_TYPE),uio)
 endif
 ifeq ($(VPU_MEMORY_TYPE),ipmmui)
 	VPU_VERSION_DEFS += -DVPU_IPMMU_MEMORY
-endif
-
-#TL Coversion mode: Some versions support T/L conversion in the vpu
-ifeq ($(VPU_INTERNAL_TL), true)
-	VPU_VERSION_DEFS += -DVPU_INTERNAL_TL
 endif

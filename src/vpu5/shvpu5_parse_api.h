@@ -28,6 +28,7 @@
 typedef struct {
 	void*			base_addr;
 	size_t			size;
+	size_t			alloc_size;
 	int 			n_sbufs;
 	size_t			buf_sizes[16];
 	void*			buf_offsets[16];
@@ -62,6 +63,14 @@ int initAvcParser(shvpu_decode_PrivateType *priv);
 int initMpegParser(shvpu_decode_PrivateType *priv);
 #else
 static inline int initMpegParser(shvpu_decode_PrivateType *priv) {
+	return -1;
+}
+#endif
+
+#ifdef VC1_DECODER
+int initVc1Parser(shvpu_decode_PrivateType *priv);
+#else
+static inline int initVc1Parser(shvpu_decode_PrivateType *priv) {
 	return -1;
 }
 #endif

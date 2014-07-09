@@ -34,6 +34,7 @@
 #include "shvpu5_parse_api.h"
 #include "shvpu5_common_log.h"
 #include <vc1dec.h>
+#include <stdint.h>
 
 typedef enum {
 	PROFILE_SIMPLE,
